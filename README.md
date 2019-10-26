@@ -64,3 +64,12 @@ data:
   withSurroundingContent: foo-$(some/other/secret#token)-bar
 disableNameSuffixHash: false  # optional, default false
 ```
+
+### To do
+
+- Substitution improvements
+  - Escaping
+  - Fix path traversal
+  - In-memory caching
+- Remove backward compatibility stuff
+- Drop Python 2 support
