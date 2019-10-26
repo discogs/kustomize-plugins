@@ -62,4 +62,5 @@ metadata:
 data:
   someSecret: $(path/to/secret#field)
   withSurroundingContent: foo-$(some/other/secret#token)-bar
+disableNameSuffixHash: false  # optional, default false
 ```
