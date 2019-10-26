@@ -1,0 +1,192 @@
+#!/usr/bin/env python
+# Generates Kubernetes manifests from a Helm chart, with support for reading secrets from Vault
+
+from __future__ import print_function, unicode_literals
+import errno
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from io import open
+
+try:
+    import yaml
+except ImportError:
+    print("fatal: pyyaml module is not installed. try `pip install pyyaml`")
+    sys.exit(1)
+
+# For Python 2 compatibility
+# (IOError is not equivalent to FileNotFoundError in general, but for our
+# needs it's fine)
+try:
+    FileNotFoundError
+except NameError:
+    FileNotFoundError = IOError
+
+ENABLE_SUBSTITUTION = (
+    os.environ.get("DISCOGS_HELMCHARTGENERATOR_V1_ENABLE_SUBSTITUTION", "true")
+    != "false"
+)
+USE_CACHE = os.environ.get("DISCOGS_HELMCHARTGENERATOR_V1_USE_CACHE", "true") != "false"
+CACHE_DIR = os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+    "kustomize",
+    "plugin",
+    "platform.discogs.com",
+    "v1",
+    "helmchartgenerator",
+)
+
+
+# Mainly for Python 2 compatibility
+def mkdir_p(path):
+    """Create a directory if it doesn't exist already."""
+    try:
+        os.makedirs(path)
+    except OSError as exc:
+        if exc.errno == errno.EEXIST and os.path.isdir(path):
+            pass
+        else:
+            raise
+
+
+def execute(command, input=None, capture_stdout=False):
+    stdin = None
+    if input:
+        stdin = subprocess.PIPE
+
+    stdout = None
+    if capture_stdout:
+        stdout = subprocess.PIPE
+
+    proc = subprocess.Popen(command, stdin=stdin, stdout=stdout)
+    try:
+        return proc.communicate(input=input)
+    finally:
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, command)
+
+
+def substitute(match):
+    spec = match.group(1)
+    if spec.startswith("file://"):
+        return substitute_file(spec[7:])
+    elif spec.startswith("envfile://"):
+        return substitute_envfile(spec[10:])
+    elif spec.startswith("env://"):
+        return substitute_env(spec[6:])
+    else:
+        # For backward compatibility, assume vault://
+        if spec.startswith("vault://"):
+            spec = spec[8:]
+        return substitute_vault(spec)
+
+
+def substitute_file(path):
+    strip = True
+    if path.endswith("?trim=false"):
+        path = path[:-11]
+        strip = False
+
+    # TODO: in-memory caching
+    # TODO: path traversal attack
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+        if strip:
+            content = content.rstrip()
+        return content
+
+
+def substitute_envfile(path_with_key):
+    path, _, target_key = path_with_key.partition("#")
+
+    # TODO: in-memory caching
+    # TODO: path traversal attack
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f.readlines():
+            key, _, value = line.strip().partition("=")
+            if key == target_key:
+                return value
+
+
+def substitute_env(key):
+    return os.environ[key]
+
+
+def substitute_vault(path_with_field):
+    path, _, field = path_with_field.partition("#")
+    value, _ = execute(["vault", "read", "-field", field, path], capture_stdout=True)
+    return value.decode("utf-8")
+
+
+SUBSTITUTION_RE = re.compile(r"\$\((.+?)\)")
+
+
+def perform_substitutions(obj):
+    if isinstance(obj, dict):
+        return {k: perform_substitutions(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [perform_substitutions(v) for v in obj]
+    elif isinstance(obj, str):
+        return SUBSTITUTION_RE.sub(substitute, obj)
+    else:
+        return obj
+
+
+def download_chart(chart, version):
+    if USE_CACHE:
+        chart_path = os.path.join(CACHE_DIR, chart.replace("/", ".") + "@" + version)
+        mkdir_p(chart_path)
+    else:
+        chart_path = tempfile.mkdtemp()
+
+    if not os.listdir(chart_path):
+        command = ["helm", "fetch", chart, "--untar", "--untardir", chart_path]
+        if version:
+            command.extend(["--version", version])
+        execute(command)
+
+    return os.path.join(chart_path, chart.partition("/")[2])
+
+
+def render_chart(generator):
+    name = generator["metadata"]["name"]
+    namespace = generator["metadata"].get("namespace")
+
+    # For backward compatibility, support `.spec.chart` (etc.)
+    # Just use `.chart` (etc.) when possible
+    spec = generator.get("spec", generator)
+
+    chart = spec["chart"]
+    version = spec.get("version")
+    values = spec.get("values", {})
+
+    if ENABLE_SUBSTITUTION:
+        values = perform_substitutions(values)
+
+    # Helm dependencies are retrieved using a separate command from the
+    # install/upgrade commands.
+    if chart.startswith((".", "/")):
+        subprocess.check_output(["helm", "dependency", "update", chart])
+        chart_path = chart
+    else:
+        chart_path = download_chart(chart, version)
+
+    # Helm won't read values from stdin, so use a temp file
+    with tempfile.NamedTemporaryFile() as f:
+        f.write(yaml.dump(values).strip().encode("utf-8"))
+        f.flush()
+
+        command = ["helm", "template", chart_path, "-n", name, "--values", f.name]
+        # NOTE: This sets the `.Release.Namespace` value, not the
+        # `.metadata.namespace` field! https://github.com/helm/helm/issues/3553
+        if namespace:
+            command.extend(["--namespace", namespace])
+        rendered, _ = execute(command, capture_stdout=True)
+        return rendered.decode("utf-8")
+
+
+if __name__ == "__main__":
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        print(render_chart(yaml.safe_load(f)))
