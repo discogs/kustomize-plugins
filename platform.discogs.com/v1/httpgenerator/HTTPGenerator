@@ -36,7 +36,12 @@ class IntegrityError(Exception):
     """Raised when a Subresource Integrity related error occurs."""
 
 
-SRI_ALGOS = {"sha384": hashlib.sha384}
+# https://www.w3.org/TR/SRI/#cryptographic-hash-functions
+SRI_ALGOS = {
+    "sha256": hashlib.sha256,
+    "sha384": hashlib.sha384,
+    "sha512": hashlib.sha512,
+}
 
 USE_CACHE = os.environ.get("DISCOGS_HTTPGENERATOR_V1_USE_CACHE", "true") != "false"
 CACHE_DIR = os.path.join(
