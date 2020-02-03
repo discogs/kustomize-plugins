@@ -43,7 +43,6 @@ SRI_ALGOS = {
     "sha512": hashlib.sha512,
 }
 
-USE_CACHE = os.environ.get("DISCOGS_HTTPGENERATOR_V1_USE_CACHE", "true") != "false"
 CACHE_DIR = os.path.join(
     os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
     "kustomize",
@@ -75,9 +74,6 @@ def sri_cache_key(integrity):
 
 
 def generate(generator):
-    if USE_CACHE:
-        mkdir_p(CACHE_DIR)
-
     common_headers = {"User-agent": "discogs-httpgenerator/v1"}
     common_headers.update(generator.get("headers", {}))
 
@@ -95,32 +91,10 @@ def generate(generator):
                 % (algo, ",".join(SRI_ALGOS))
             )
 
-        cached_resource_path = os.path.join(CACHE_DIR, sri_cache_key(integrity))
-        try:
-            if not USE_CACHE:
-                raise FileNotFoundError
-
-            with open(cached_resource_path, "rb") as f:
-                content = f.read()
-
-                # Sanity check: does the cached content match its integrity hash?
-                cached_content_hash = sri_hash(content, algo)
-                if expected_content_hash != cached_content_hash:
-                    print(
-                        "HTTPGenerator warning: Cached resource failed integrity check, "
-                        "falling back to HTTP request: url=%s algo=%s expected=%s computed=%s"
-                        % (url, algo, expected_content_hash, cached_content_hash),
-                        file=sys.stderr,
-                    )
-                    raise FileNotFoundError
-        except FileNotFoundError:
-            response = requests.get(url, headers=headers)
-            if not response.ok:
-                response.raise_for_status()
-            content = response.content
-            if USE_CACHE:
-                with open(cached_resource_path, "wb") as f:
-                    f.write(content)
+        response = requests.get(url, headers=headers)
+        if not response.ok:
+            response.raise_for_status()
+        content = response.content
 
         content_hash = sri_hash(content, algo)
 
